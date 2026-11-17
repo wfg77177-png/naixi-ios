@@ -703,6 +703,7 @@ webView?.load(URLRequest(url: url))
 }
 func goHome() { load(homeURL)}
 func goNewAPI() { load(newAPIURL)}
+func goLogin() { load(URL(string: "https://forum.naixi.net/member.php?mod=logging&action=login")!) }
 func reload() { webView?.reload()}
 func goBack() { webView?.goBack()}
 func backToTop() {
@@ -1140,7 +1141,6 @@ struct ContentView: View {
 var body: some View {
 ZStack(alignment:.bottom) {
 WebView(model: model)
-.ignoresSafeArea(edges:.top)
 BottomBar(model: model, showSections: $showSections, showSettings: $showSettings)
 .padding(.horizontal, 10)
 .padding(.bottom, 8)
@@ -1239,6 +1239,7 @@ BarButton(icon: model.isDark ? "moon.fill" : "moon", label: "深色") {
 model.setDark(!model.isDark)
 }
 BarButton(icon: "arrow.up", label: "顶部") { model.backToTop()}
+BarButton(icon: "person.crop.circle", label: "登录") { model.goLogin()}
 BarButton(icon: "gearshape", label: "设置") { showSettings = true}
 }
 .padding(.vertical, 8)
