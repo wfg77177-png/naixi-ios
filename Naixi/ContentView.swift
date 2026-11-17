@@ -140,7 +140,7 @@ row.style.display = hit? 'none': '';
 }
 window.__nxApplyKeywords = applyKeywords;
 applyKeywords();
-new MutationObserver(function(){ applyKeywords(); applyReadMarks(); applyFolding();}).observe(document.documentElement, {childList:true, subtree:true});
+new MutationObserver(function(){ applyKeywords(); applyReadMarks(); applyFolding(); applyUserMarks(); applyHighlight(); nxSetupCodeBlocks();}).observe(document.documentElement, {childList:true, subtree:true});
 
 // ---------- 5. Fullscreen image viewer ----------
 document.addEventListener('click', function(e){
@@ -299,7 +299,7 @@ var newHref = newNext ? newNext.getAttribute('href') : null;
 document.querySelectorAll('a.nxt').forEach(function(n){
 if(newHref){ n.setAttribute('href', newHref); } else { n.remove(); }
 });
-applyKeywords(); applyReadMarks(); applyFolding();
+applyKeywords(); applyReadMarks(); applyFolding(); applyUserMarks(); applyHighlight(); nxSetupCodeBlocks();
 nxLoadingNext = false;
 }).catch(function(){ nxLoadingNext = false; });
 }
@@ -463,6 +463,214 @@ document.body.appendChild(ov);
 }).catch(function(){ showToast('预览加载失败'); });
 }
 })();
+
+// ---------- 16. User notes + blacklist ----------
+// localStorage 'nx_notes' = {username: note}; 'nx_blocked' = [username].
+// Display-only changes; nothing is ever posted.
+function getNotes(){ try{ return JSON.parse(localStorage.getItem('nx_notes')||'{}'); }catch(e){ return {}; } }
+function getBlocked(){ try{ return JSON.parse(localStorage.getItem('nx_blocked')||'[]'); }catch(e){ return []; } }
+function applyUserMarks(){
+document.querySelectorAll('.nx-note-badge').forEach(function(b){ b.remove(); });
+document.querySelectorAll('[data-nx-hidden="1"]').forEach(function(el){ el.style.display=''; el.removeAttribute('data-nx-hidden'); });
+var notes = getNotes(), blocked = getBlocked();
+var hasNotes = Object.keys(notes).length>0, hasBlocked = blocked.length>0;
+if(!hasNotes && !hasBlocked) return;
+document.querySelectorAll('a[href*="space-uid-"], a[href*="uid="]').forEach(function(a){
+var name = (a.textContent||'').trim();
+if(!name) return;
+if(hasBlocked && blocked.indexOf(name)!==-1){
+var post = a.closest('div[id^="post_"]');
+if(post){ post.style.display='none'; post.setAttribute('data-nx-hidden','1'); return; }
+var row = a.closest('tr, li');
+if(row){ row.style.display='none'; row.setAttribute('data-nx-hidden','1'); }
+return;
+}
+if(hasNotes && notes[name]){
+var s = document.createElement('span');
+s.className='nx-note-badge';
+s.textContent = ' ' + notes[name];
+s.style.cssText='background:#fff3bf;color:#7a5b00;font-size:12px;border-radius:4px;padding:1px 5px;margin-left:4px;';
+a.parentNode.insertBefore(s, a.nextSibling);
+}
+});
+}
+window.__nxSetNotes = function(json){ store('notes', json||'{}'); applyUserMarks(); };
+window.__nxSetBlocked = function(json){ store('blocked', json||'[]'); applyUserMarks(); };
+applyUserMarks();
+
+// ---------- 17. Keyword highlight (separate from the filter list) ----------
+function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function hlHtml(txt, kws){
+var parts = [txt], found = false;
+kws.forEach(function(k){
+var next = [];
+parts.forEach(function(p){
+if(typeof p!=='string'){ next.push(p); return; }
+var idx = p.indexOf(k);
+if(idx===-1){ next.push(p); return; }
+found = true;
+while(idx!==-1){
+if(idx>0) next.push(p.slice(0, idx));
+next.push({hl:k});
+p = p.slice(idx+k.length);
+idx = p.indexOf(k);
+}
+if(p) next.push(p);
+});
+parts = next;
+});
+if(!found) return null;
+return parts.map(function(p){ return (typeof p==='string') ? escHtml(p) : '<span style="background:#ffe58a">'+escHtml(p.hl)+'</span>'; }).join('');
+}
+function applyHighlight(){
+var csv = read('hl','');
+var kws = csv.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length>0; });
+document.querySelectorAll('a[href*="thread-"], a[href*="mod=viewthread"], a[href*="space-uid-"], a[href*="uid="]').forEach(function(a){
+var orig = a.getAttribute('data-nx-orig');
+if(orig===null){ orig = a.textContent||''; a.setAttribute('data-nx-orig', orig); }
+if(!kws.length){ a.textContent = orig; return; }
+var html = hlHtml(orig, kws);
+if(html!==null){ a.innerHTML = html; } else { a.textContent = orig; }
+});
+}
+window.__nxSetHighlight = function(csv){ store('hl', csv||''); applyHighlight(); };
+applyHighlight();
+
+// ---------- 18. Quick reply templates ----------
+// Inserts text into the reply box ONLY. The user must tap send.
+// The reply-box selector is a best-effort fallback chain: the real
+// reply box HTML cannot be verified without a logged-in session, so
+// if tapping a template does nothing, the selector needs adjusting
+// against the live logged-in page.
+window.__nxInsertTemplate = function(text){
+var box = document.querySelector('#reply_content') || document.querySelector('textarea[name="content"]') || document.querySelector('form textarea') || document.querySelector('textarea');
+if(!box){ showToast('未找到回复框，请先点回复'); return false; }
+box.focus();
+box.value = (box.value ? box.value + '\\n' : '') + text;
+box.dispatchEvent(new Event('input', {bubbles:true}));
+showToast('已插入模板，点发送即可');
+return true;
+};
+
+// ---------- 19. Code block copy + basic highlight ----------
+function nxFallbackCopy(txt){
+var ta = document.createElement('textarea');
+ta.value = txt; ta.style.cssText='position:fixed;opacity:0;';
+document.body.appendChild(ta); ta.select();
+try{ document.execCommand('copy'); showToast('已复制代码'); }catch(e){ showToast('复制失败'); }
+ta.remove();
+}
+function nxCopyCode(txt){
+if(navigator.clipboard && navigator.clipboard.writeText){
+navigator.clipboard.writeText(txt).then(function(){ showToast('已复制代码'); }, function(){ nxFallbackCopy(txt); });
+} else { nxFallbackCopy(txt); }
+}
+var nxCodeKeywords = {function:1,var:1,let:1,const:1,if:1,else:1,for:1,while:1,return:1,class:1,import:1,export:1,new:1,switch:1,case:1,break:1,continue:1,try:1,catch:1,finally:1,throw:1,typeof:1,instanceof:1,in:1,of:1,do:1,void:1,delete:1,yield:1,await:1,async:1,this:1,super:1,extends:1,static:1,get:1,set:1};
+function nxHighlightCode(code){
+var out='', i=0, n=code.length;
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+while(i<n){
+var two = code.slice(i, i+2);
+if(two==='//'){
+var eol = code.indexOf('\\n', i);
+if(eol===-1) eol = n;
+out += '<span style="color:#6a737d">'+esc(code.slice(i, eol))+'</span>';
+i = eol; continue;
+}
+if(two==='/*'){
+var end = code.indexOf('*/', i+2);
+if(end===-1) end = n; else end += 2;
+out += '<span style="color:#6a737d">'+esc(code.slice(i, end))+'</span>';
+i = end; continue;
+}
+var ch = code[i];
+if(ch==='"' || ch==="'"){
+var j=i+1;
+while(j<n){ if(code[j]==='\\\\'){ j+=2; continue; } if(code[j]===ch) break; if(code[j]==='\\n') break; j++; }
+if(j<n && code[j]===ch) j++;
+out += '<span style="color:#032f62">'+esc(code.slice(i, j))+'</span>';
+i = j; continue;
+}
+if((ch>='a' && ch<='z') || (ch>='A' && ch<='Z') || ch==='_' || ch==='$'){
+var k=i+1;
+while(k<n){ var c=code[k]; if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c==='_'||c==='$') k++; else break; }
+var word = code.slice(i, k);
+if(nxCodeKeywords[word]){ out += '<span style="color:#d73a49">'+esc(word)+'</span>'; }
+else { out += esc(word); }
+i = k; continue;
+}
+if(ch>='0' && ch<='9'){
+var m=i+1;
+while(m<n){ var d=code[m]; if((d>='0'&&d<='9')||d==='.') m++; else break; }
+out += '<span style="color:#005cc5">'+esc(code.slice(i, m))+'</span>';
+i = m; continue;
+}
+out += esc(ch);
+i++;
+}
+return out;
+}
+function nxSetupCodeBlocks(){
+document.querySelectorAll('pre, .blockcode').forEach(function(el){
+if(el.getAttribute('data-nx-code')) return;
+el.setAttribute('data-nx-code','1');
+if(el.tagName==='PRE' && !el.querySelector('*')){
+var raw = el.textContent || '';
+el.innerHTML = nxHighlightCode(raw);
+}
+var btn = document.createElement('button');
+btn.textContent='复制';
+btn.style.cssText='position:absolute;top:6px;right:6px;padding:3px 10px;border-radius:10px;border:1px solid #bbb;background:rgba(255,255,255,0.9);color:#333;font-size:12px;z-index:5;';
+btn.addEventListener('click', function(e){ e.stopPropagation(); nxCopyCode(el.innerText || ''); });
+if(window.getComputedStyle(el).position==='static'){ el.style.position='relative'; }
+el.appendChild(btn);
+});
+}
+nxSetupCodeBlocks();
+
+// ---------- 20. In-page bilingual translation ----------
+// Translation runs ONLY when the user taps translate. Free default is
+// MyMemory (no key); an optional BYOK OpenAI-compatible key/base/model
+// is set in Settings and stored in UserDefaults on-device only.
+window.__nxShowTranslation = function(orig, trans){
+var old = document.getElementById('nx-tr-panel'); if(old) old.remove();
+var p = document.createElement('div'); p.id='nx-tr-panel';
+p.style.cssText='position:fixed;left:12px;right:12px;bottom:90px;max-height:45vh;overflow:auto;background:#fff;color:#111;border-radius:14px;padding:14px;z-index:999999;box-shadow:0 4px 24px rgba(0,0,0,0.3);font-size:15px;line-height:1.6;';
+var o = document.createElement('div'); o.textContent = orig; p.appendChild(o);
+var t = document.createElement('div'); t.textContent = trans; t.style.cssText='color:#2563eb;margin-top:8px;'; p.appendChild(t);
+var c = document.createElement('button'); c.textContent='关闭'; c.style.cssText='margin-top:10px;padding:6px 16px;border-radius:12px;border:1px solid #ccc;background:#f2f2f2;font-size:14px;'; c.addEventListener('click', function(){ p.remove(); }); p.appendChild(c);
+document.body.appendChild(p);
+};
+window.__nxCollectTranslatable = function(){
+var out = [];
+var title = document.querySelector('#thread_subject');
+if(title){ title.setAttribute('data-nx-trid','title'); out.push({id:'title', text:(title.textContent||'').trim()}); }
+document.querySelectorAll('.t_f').forEach(function(el, i){
+var s=(el.innerText||'').trim();
+if(!s) return;
+el.setAttribute('data-nx-trid', 'p'+i);
+out.push({id:'p'+i, text:s.slice(0, 2500)});
+});
+return JSON.stringify(out);
+};
+window.__nxApplyTranslations = function(json){
+var arr = []; try{ arr = JSON.parse(json); }catch(e){ return; }
+arr.forEach(function(it){
+var el = document.querySelector('[data-nx-trid="'+it.id+'"]');
+if(!el || !el.parentNode) return;
+var old = el.parentNode.querySelector('[data-nx-tr="'+it.id+'"]');
+if(old) old.remove();
+var d = document.createElement('div');
+d.setAttribute('data-nx-tr', it.id);
+d.textContent = it.trans;
+d.style.cssText='color:#2563eb;background:#eff6ff;border-radius:8px;padding:8px 10px;margin:6px 0;font-size:15px;line-height:1.6;';
+el.parentNode.insertBefore(d, el.nextSibling);
+});
+};
+window.__nxClearTranslation = function(){
+document.querySelectorAll('[data-nx-tr]').forEach(function(d){ d.remove(); });
+var p = document.getElementById('nx-tr-panel'); if(p) p.remove();
+};
 })();
 """
 
@@ -512,7 +720,7 @@ self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('未找�
 func setDark(_ on: Bool) {
 isDark = on
 UserDefaults.standard.set(on, forKey: "nx_dark")
-webView?.evaluateJavaScript("window.__nxSetDark && window.__nxSetDark(\(on? "true": "false"));", completionHandler: nil)
+webView?.evaluateJavaScript("window.__nxSetDark && window.__nxSetDark(\(on ? "true" : "false"));", completionHandler: nil)
 }
 func setFontScale(_ s: CGFloat) {
 fontScale = s
@@ -522,7 +730,7 @@ webView?.pageZoom = s
 func setHideAds(_ on: Bool) {
 hideAds = on
 UserDefaults.standard.set(on, forKey: "nx_hideAds")
-webView?.evaluateJavaScript("window.__nxSetHideAds && window.__nxSetHideAds(\(on? "true": "false"));", completionHandler: nil)
+webView?.evaluateJavaScript("window.__nxSetHideAds && window.__nxSetHideAds(\(on ? "true" : "false"));", completionHandler: nil)
 }
 func setKeywords(_ s: String) {
 keywords = s
@@ -650,6 +858,266 @@ pop.permittedArrowDirections = []
 }
 top.present(vc, animated: true)
 }
+
+// MARK: - v2 batch B: safe features (read-only or user-triggered)
+// Translation config lives in UserDefaults on-device only (NOT
+// localStorage, NOT the repo). The BYOK key never leaves the device
+// except in the Authorization header of the user's own API calls.
+@Published var userNotesText = ""
+@Published var blockedText = ""
+@Published var highlightText = ""
+@Published var templatesText = ""
+@Published var templates: [String] = []
+@Published var searchHistory: [String] = []
+@Published var trKey = ""
+@Published var trBase = "https://openrouter.ai/api/v1"
+@Published var trModel = "deepseek-chat"
+
+func restoreBatchBSettings() {
+userNotesText = UserDefaults.standard.string(forKey: "nx_notesText") ?? ""
+blockedText = UserDefaults.standard.string(forKey: "nx_blockedText") ?? ""
+highlightText = UserDefaults.standard.string(forKey: "nx_hlText") ?? ""
+setTemplatesText(UserDefaults.standard.string(forKey: "nx_templatesText") ?? "")
+searchHistory = UserDefaults.standard.stringArray(forKey: "nx_searchHist") ?? []
+loadTrConfig()
+}
+
+func setUserNotesText(_ s: String) {
+userNotesText = s
+UserDefaults.standard.set(s, forKey: "nx_notesText")
+var dict: [String: String] = [:]
+s.split(separator: "\n").forEach { line in
+let parts = line.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+if parts.count == 2, !parts[0].isEmpty { dict[parts[0]] = parts[1] }
+}
+let json = (try? JSONSerialization.data(withJSONObject: dict)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+let esc = json.replacingOccurrences(of: "'", with: "\\'")
+webView?.evaluateJavaScript("window.__nxSetNotes && window.__nxSetNotes('\(esc)');", completionHandler: nil)
+}
+
+func setBlockedText(_ s: String) {
+blockedText = s
+UserDefaults.standard.set(s, forKey: "nx_blockedText")
+let names = s.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+let json = (try? JSONSerialization.data(withJSONObject: names)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+let esc = json.replacingOccurrences(of: "'", with: "\\'")
+webView?.evaluateJavaScript("window.__nxSetBlocked && window.__nxSetBlocked('\(esc)');", completionHandler: nil)
+}
+
+func setHighlightText(_ s: String) {
+highlightText = s
+UserDefaults.standard.set(s, forKey: "nx_hlText")
+let esc = s.replacingOccurrences(of: "'", with: "\\'")
+webView?.evaluateJavaScript("window.__nxSetHighlight && window.__nxSetHighlight('\(esc)');", completionHandler: nil)
+}
+
+func setTemplatesText(_ s: String) {
+templatesText = s
+UserDefaults.standard.set(s, forKey: "nx_templatesText")
+templates = s.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
+func insertTemplate(_ t: String) {
+let esc = t.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n")
+webView?.evaluateJavaScript("window.__nxInsertTemplate && window.__nxInsertTemplate('\(esc)');", completionHandler: nil)
+}
+
+func search(_ q: String) {
+let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
+guard !query.isEmpty else { return }
+var hist = searchHistory
+hist.removeAll { $0 == query }
+hist.insert(query, at: 0)
+if hist.count > 10 { hist = Array(hist.prefix(10)) }
+searchHistory = hist
+UserDefaults.standard.set(hist, forKey: "nx_searchHist")
+let enc = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+if let url = URL(string: "https://forum.naixi.net/search.php?mod=forum&srchtxt=\(enc)&searchsubmit=yes") {
+load(url)
+}
+}
+
+func goSearchPage() {
+if let url = URL(string: "https://forum.naixi.net/search.php?mod=forum") { load(url) }
+}
+
+func shareCurrentPage() {
+let title = webView?.title ?? ""
+let url = webView?.url
+var items: [Any] = []
+if !title.isEmpty { items.append(title) }
+if let url = url { items.append(url) }
+if items.isEmpty { return }
+presentShare(items: items)
+}
+
+// MARK: - v2 batch B: in-page bilingual translation
+func saveTrConfig() {
+UserDefaults.standard.set(trKey, forKey: "nx_trKey")
+UserDefaults.standard.set(trBase, forKey: "nx_trBase")
+UserDefaults.standard.set(trModel, forKey: "nx_trModel")
+}
+
+func loadTrConfig() {
+trKey = UserDefaults.standard.string(forKey: "nx_trKey") ?? ""
+trBase = UserDefaults.standard.string(forKey: "nx_trBase") ?? "https://openrouter.ai/api/v1"
+trModel = UserDefaults.standard.string(forKey: "nx_trModel") ?? "deepseek-chat"
+}
+
+private func containsCJK(_ s: String) -> Bool {
+s.unicodeScalars.contains { ($0.value >= 0x4E00 && $0.value <= 0x9FFF) || ($0.value >= 0x3400 && $0.value <= 0x4DBF) }
+}
+
+private func splitForTranslate(_ text: String, maxBytes: Int) -> [String] {
+var chunks: [String] = []
+var current = ""
+for para in text.components(separatedBy: "\n") {
+let add = current.isEmpty ? para : "\n" + para
+if (current + add).utf8.count > maxBytes {
+if !current.isEmpty { chunks.append(current); current = "" }
+var rest = para
+while rest.utf8.count > maxBytes {
+let cut = rest.prefix(maxBytes / 3)
+chunks.append(String(cut))
+rest = String(rest.dropFirst(cut.count))
+}
+current = rest
+} else {
+current += add
+}
+}
+if !current.isEmpty { chunks.append(current) }
+return chunks
+}
+
+private func translateChunk(_ text: String, completion: @escaping (String?) -> Void) {
+if !trKey.isEmpty {
+translateBYOK(text, completion: completion)
+} else {
+translateMyMemory(text, completion: completion)
+}
+}
+
+private func translateMyMemory(_ text: String, completion: @escaping (String?) -> Void) {
+let pair = containsCJK(text) ? "zh-CN|en" : "en|zh-CN"
+guard let enc = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+let url = URL(string: "https://api.mymemory.translated.net/get?q=\(enc)&langpair=\(pair)") else {
+completion(nil); return
+}
+URLSession.shared.dataTask(with: url) { data, _, _ in
+guard let data = data,
+let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+let resp = obj["responseData"] as? [String: Any],
+let out = resp["translatedText"] as? String else {
+completion(nil); return
+}
+completion(out)
+}.resume()
+}
+
+private func translateBYOK(_ text: String, completion: @escaping (String?) -> Void) {
+let base = trBase.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+guard let url = URL(string: base + "/chat/completions") else { completion(nil); return }
+var req = URLRequest(url: url)
+req.httpMethod = "POST"
+req.setValue("Bearer \(trKey)", forHTTPHeaderField: "Authorization")
+req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+let body: [String: Any] = [
+"model": trModel,
+"messages": [
+["role": "system", "content": "Translate the following text. Return only the translation, no explanation."],
+["role": "user", "content": text]
+]
+]
+req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+URLSession.shared.dataTask(with: req) { data, _, _ in
+guard let data = data,
+let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+let choices = obj["choices"] as? [[String: Any]],
+let msg = choices.first?["message"] as? [String: Any],
+let out = msg["content"] as? String else {
+completion(nil); return
+}
+completion(out.trimmingCharacters(in: .whitespacesAndNewlines))
+}.resume()
+}
+
+private func translateChunks(_ chunks: [String], index: Int, acc: [String], completion: @escaping (String?) -> Void) {
+if index >= chunks.count { completion(acc.joined(separator: "\n")); return }
+translateChunk(chunks[index]) { out in
+guard let out = out else { completion(nil); return }
+var next = acc
+next.append(out)
+self.translateChunks(chunks, index: index + 1, acc: next, completion: completion)
+}
+}
+
+private func translateBlocks(_ items: [[String: String]], index: Int, acc: [[String: String]], completion: @escaping ([[String: String]]) -> Void) {
+if index >= items.count { completion(acc); return }
+let it = items[index]
+let chunks = splitForTranslate(it["text"] ?? "", maxBytes: trKey.isEmpty ? 450 : 8000)
+translateChunks(chunks, index: 0, acc: []) { translated in
+var next = acc
+if let translated = translated {
+next.append(["id": it["id"] ?? "", "trans": translated])
+}
+self.translateBlocks(items, index: index + 1, acc: next, completion: completion)
+}
+}
+
+func translateSelection() {
+webView?.evaluateJavaScript("window.getSelection ? (window.getSelection().toString()||'') : ''") { result, _ in
+let text = (result as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+guard !text.isEmpty else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('请先在页面里选中要翻译的文字');", completionHandler: nil)
+return
+}
+let chunks = self.splitForTranslate(text, maxBytes: self.trKey.isEmpty ? 450 : 8000)
+self.translateChunks(chunks, index: 0, acc: []) { translated in
+guard let translated = translated else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('翻译失败，请稍后再试');", completionHandler: nil)
+return
+}
+let escO = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n")
+let escT = translated.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n")
+self.webView?.evaluateJavaScript("window.__nxShowTranslation && window.__nxShowTranslation('\(escO)', '\(escT)');", completionHandler: nil)
+}
+}
+}
+
+func translatePage() {
+webView?.evaluateJavaScript("window.__nxCollectTranslatable && window.__nxCollectTranslatable();") { result, _ in
+guard let json = result as? String,
+let data = json.data(using: .utf8),
+let items = try? JSONSerialization.jsonObject(with: data) as? [[String: String]], !items.isEmpty else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('当前页没有可翻译的正文');", completionHandler: nil)
+return
+}
+let limit = self.trKey.isEmpty ? 2500 : 8000
+var total = 0
+var picked: [[String: String]] = []
+for it in items {
+let n = (it["text"] ?? "").count
+if total + n > limit, !picked.isEmpty { break }
+total += n
+picked.append(it)
+}
+self.translateBlocks(picked, index: 0, acc: []) { results in
+guard !results.isEmpty else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('翻译失败，请稍后再试');", completionHandler: nil)
+return
+}
+let data = (try? JSONSerialization.data(withJSONObject: results)) ?? Data()
+let json = String(data: data, encoding: .utf8) ?? "[]"
+let esc = json.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+self.webView?.evaluateJavaScript("window.__nxApplyTranslations && window.__nxApplyTranslations('\(esc)');", completionHandler: nil)
+}
+}
+}
+
+func clearTranslation() {
+webView?.evaluateJavaScript("window.__nxClearTranslation && window.__nxClearTranslation();", completionHandler: nil)
+}
 }
 
 // MARK: - AVSpeechSynthesizerDelegate (reset speaking state)
@@ -680,12 +1148,13 @@ BottomBar(model: model, showSections: $showSections, showSettings: $showSettings
 .sheet(isPresented: $showSettings) { SettingsSheet(model: model)}
 .onAppear {
 model.isDark = UserDefaults.standard.bool(forKey: "nx_dark")
-model.hideAds = UserDefaults.standard.object(forKey: "nx_hideAds") as? Bool?? true
-model.keywords = UserDefaults.standard.string(forKey: "nx_keywords")?? ""
+model.hideAds = UserDefaults.standard.object(forKey: "nx_hideAds") as? Bool ?? true
+model.keywords = UserDefaults.standard.string(forKey: "nx_keywords") ?? ""
 let fs = UserDefaults.standard.double(forKey: "nx_fontScale")
 if fs > 0 { model.fontScale = CGFloat(fs)}
 model.infiniteScroll = UserDefaults.standard.object(forKey: "nx_infinite") as? Bool ?? true
 model.foldLongPosts = UserDefaults.standard.object(forKey: "nx_fold") as? Bool ?? true
+model.restoreBatchBSettings()
 }
 }
 }
@@ -718,11 +1187,11 @@ let webView = WKWebView(frame:.zero, configuration: config)
 webView.navigationDelegate = context.coordinator
 webView.allowsBackForwardNavigationGestures = true
 webView.scrollView.bounces = true
-webView.scrollView.contentInsetAdjustmentBehavior =.always
+webView.scrollView.contentInsetAdjustmentBehavior = .always
 // leave room so the last line is never hidden behind the bottom bar
 webView.scrollView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 76, right: 0)
 webView.scrollView.scrollIndicatorInsets = UIEdgeInsets(top: 0, left: 0, bottom: 76, right: 0)
-if model.fontScale!= 1.0 { webView.pageZoom = model.fontScale}
+if model.fontScale != 1.0 { webView.pageZoom = model.fontScale }
 webView.load(URLRequest(url: model.homeURL))
 model.webView = webView
 return webView
@@ -737,7 +1206,7 @@ func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
 model.canGoBack = webView.canGoBack
 // Apply the saved font size now that the page is loaded
 // (makeUIView runs before onAppear restores it).
-if model.fontScale!= 1.0 { webView.pageZoom = model.fontScale}
+if model.fontScale != 1.0 { webView.pageZoom = model.fontScale }
 // Re-run the late-bound features now the page is truly loaded
 // (not on a half-loaded or challenge page): keyword filter,
 // scroll restore, and the once-per-day auto sign-in.
@@ -765,7 +1234,7 @@ BarButton(icon: "house", label: "首页") { model.goHome()}
 BarButton(icon: "square.grid.2x2", label: "分区") { showSections = true}
 BarButton(icon: "checkmark.seal", label: "签到") { model.manualSignIn()}
 BarButton(icon: "bolt", label: "API") { model.goNewAPI()}
-BarButton(icon: model.isDark? "moon.fill": "moon", label: "深色") {
+BarButton(icon: model.isDark ? "moon.fill" : "moon", label: "深色") {
 model.setDark(!model.isDark)
 }
 BarButton(icon: "arrow.up", label: "顶部") { model.backToTop()}
@@ -802,12 +1271,46 @@ Text(label)
 struct SectionSheet: View {
 @ObservedObject var model: BrowserModel
 @Environment(\.dismiss) private var dismiss
+@State private var searchText = ""
 
 let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
 
 var body: some View {
 NavigationStack {
 ScrollView {
+VStack(alignment: .leading, spacing: 10) {
+TextField("搜索帖子…", text: $searchText)
+.textFieldStyle(.roundedBorder)
+.submitLabel(.search)
+.onSubmit {
+if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+model.search(searchText)
+dismiss()
+}
+}
+if !model.searchHistory.isEmpty {
+ScrollView(.horizontal, showsIndicators: false) {
+HStack(spacing: 8) {
+ForEach(model.searchHistory, id: \.self) { h in
+Button(h) {
+model.search(h)
+dismiss()
+}
+.font(.system(size: 13))
+.padding(.horizontal, 10)
+.padding(.vertical, 6)
+.background(Color(.secondarySystemBackground), in: Capsule())
+.buttonStyle(.plain)
+}
+}
+}
+}
+Button("站内搜索页") { model.goSearchPage(); dismiss() }
+.font(.system(size: 13))
+.foregroundStyle(.secondary)
+}
+.padding(.horizontal, 16)
+.padding(.top, 12)
 LazyVGrid(columns: columns, spacing: 12) {
 ForEach(model.sections, id: \.self) { name in
 Button {
@@ -841,6 +1344,13 @@ struct SettingsSheet: View {
 @ObservedObject var model: BrowserModel
 @Environment(\.dismiss) private var dismiss
 @State private var keywordsText = ""
+@State private var notesText = ""
+@State private var blockedText = ""
+@State private var highlightText = ""
+@State private var templatesText = ""
+@State private var trKey = ""
+@State private var trBase = ""
+@State private var trModel = ""
 
 var body: some View {
 NavigationStack {
@@ -879,6 +1389,72 @@ Button("导出 Markdown") { model.exportMarkdown() }
 Button("转 PDF") { model.exportPDF() }
 Button("保存本页图片到相册") { model.savePageImages(); dismiss() }
 Button(model.isSpeaking ? "停止朗读" : "朗读本页") { model.toggleSpeak(); dismiss() }
+Menu("插入回复模板") {
+if model.templates.isEmpty {
+Text("没有模板，先在下方添加")
+} else {
+ForEach(model.templates, id: \.self) { t in
+Button(t) { model.insertTemplate(t); dismiss() }
+}
+}
+}
+Button("翻译选中文字") { model.translateSelection(); dismiss() }
+Button("翻译本页（双语对照）") { model.translatePage(); dismiss() }
+Button("清除翻译") { model.clearTranslation(); dismiss() }
+Button("分享当前页") { model.shareCurrentPage() }
+}
+Section("用户备注与黑名单") {
+Text("备注格式：用户名=备注，每行一个；帖子页用户名旁会显示小黄条。黑名单每行一个用户名，列表和回复里都会隐藏。")
+.font(.footnote)
+.foregroundStyle(.secondary)
+TextEditor(text: $notesText)
+.frame(minHeight: 70)
+.onChange(of: notesText) { v in model.setUserNotesText(v) }
+Text("黑名单（每行一个用户名）")
+.font(.footnote)
+.foregroundStyle(.secondary)
+TextEditor(text: $blockedText)
+.frame(minHeight: 70)
+.onChange(of: blockedText) { v in model.setBlockedText(v) }
+}
+Section("关键词高亮") {
+TextField("多个关键词用英文逗号隔开", text: $highlightText)
+.onChange(of: highlightText) { v in model.setHighlightText(v) }
+HStack {
+Button("复制导出") { UIPasteboard.general.string = highlightText }
+Button("从剪贴板导入") {
+if let s = UIPasteboard.general.string {
+highlightText = s
+model.setHighlightText(s)
+}
+}
+}
+Text("和屏蔽词分开两组。命中的标题和用户名会标黄。")
+.font(.footnote)
+.foregroundStyle(.secondary)
+}
+Section("快捷回复模板") {
+TextEditor(text: $templatesText)
+.frame(minHeight: 90)
+.onChange(of: templatesText) { v in model.setTemplatesText(v) }
+Text("每行一条模板。在帖子页点「插入回复模板」选一条插进回复框，发送要自己点。")
+.font(.footnote)
+.foregroundStyle(.secondary)
+}
+Section("翻译设置") {
+SecureField("BYOK Key（可选，留空用免费接口）", text: $trKey)
+.onChange(of: trKey) { _ in model.trKey = trKey; model.saveTrConfig() }
+TextField("Base URL", text: $trBase)
+.autocapitalization(.none)
+.disableAutocorrection(true)
+.onChange(of: trBase) { _ in model.trBase = trBase; model.saveTrConfig() }
+TextField("模型", text: $trModel)
+.autocapitalization(.none)
+.disableAutocorrection(true)
+.onChange(of: trModel) { _ in model.trModel = trModel; model.saveTrConfig() }
+Text("默认免费 MyMemory 接口（无需 key，每页上限 2500 字）；填了 Key 后走你自己的 OpenAI 兼容接口（每页上限 8000 字）。Key 只存在本机，不进代码仓库。")
+.font(.footnote)
+.foregroundStyle(.secondary)
 }
 Section("阅读记录") {
 Button("清空已读记录") { model.clearReadHistory() }
@@ -908,7 +1484,16 @@ ToolbarItem(placement:.confirmationAction) {
 Button("完成") { dismiss()}
 }
 }
-.onAppear { keywordsText = model.keywords}
+.onAppear {
+keywordsText = model.keywords
+notesText = model.userNotesText
+blockedText = model.blockedText
+highlightText = model.highlightText
+templatesText = model.templatesText
+trKey = model.trKey
+trBase = model.trBase
+trModel = model.trModel
+}
 }
 .presentationDetents([.medium,.large])
 }
