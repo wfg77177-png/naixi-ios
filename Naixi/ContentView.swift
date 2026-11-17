@@ -252,7 +252,7 @@ showToast('已清空已读记录');
 applyReadMarks();
 
 // ---------- 11. Infinite scroll (append next list page) ----------
-var nxInfinite = read('infinite','1')==='1';
+var nxInfinite = read('infinite','0')==='1';
 var nxLoadingNext = false;
 window.__nxSetInfinite = function(on){ store('infinite', on?'1':'0'); nxInfinite = !!on; };
 function isListPage(){
@@ -416,53 +416,6 @@ if(urls.indexOf(src)===-1) urls.push(src);
 });
 return JSON.stringify(urls.slice(0, 50));
 };
-
-// ---------- 15. Long-press thread preview ----------
-(function(){
-var pvTimer = null, pvX = 0, pvY = 0, pvA = null;
-function pvCancel(){ if(pvTimer){ clearTimeout(pvTimer); pvTimer = null; } }
-var noCallout = document.createElement('style');
-noCallout.textContent='a[href*="thread-"],a[href*="mod=viewthread"]{-webkit-touch-callout:none;}';
-document.documentElement.appendChild(noCallout);
-document.addEventListener('touchstart', function(e){
-pvCancel();
-var a = e.target.closest ? e.target.closest('a[href*="thread-"], a[href*="mod=viewthread"]') : null;
-if(!a || !e.touches || e.touches.length!==1) return;
-pvA = a; pvX = e.touches[0].clientX; pvY = e.touches[0].clientY;
-pvTimer = setTimeout(function(){ pvTimer = null; pvShowPreview(pvA); }, 650);
-}, {passive:true});
-document.addEventListener('touchmove', function(e){
-if(!pvTimer) return;
-var t = e.touches[0];
-if(Math.abs(t.clientX-pvX) > 12 || Math.abs(t.clientY-pvY) > 12) pvCancel();
-}, {passive:true});
-document.addEventListener('touchend', pvCancel, {passive:true});
-function pvShowPreview(a){
-var href = a.getAttribute('href');
-if(!href) return;
-var url = href.indexOf('http')===0 ? href : new URL(href, location.href).href;
-fetch(url, {credentials:'include'}).then(function(r){ return r.text(); }).then(function(html){
-var doc = new DOMParser().parseFromString(html, 'text/html');
-var first = doc.querySelector('.t_f');
-var txt = first ? (first.innerText||'').trim().slice(0, 300) : '（无预览）';
-var title = (a.textContent||'').trim();
-var ov = document.createElement('div');
-ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:999998;display:flex;align-items:flex-end;justify-content:center;';
-var card = document.createElement('div');
-card.style.cssText = 'background:#fff;color:#111;border-radius:18px 18px 0 0;padding:18px;max-height:55vh;overflow:auto;width:100%;font-size:15px;line-height:1.6;';
-var h = document.createElement('div');
-h.textContent = title; h.style.cssText='font-weight:700;margin-bottom:8px;';
-var p = document.createElement('p'); p.textContent = txt; p.style.margin='0';
-var open = document.createElement('button');
-open.textContent='打开帖子'; open.style.cssText='margin-top:14px;width:100%;padding:10px;border-radius:12px;border:none;background:#007aff;color:#fff;font-size:16px;';
-open.addEventListener('click', function(){ ov.remove(); a.click(); });
-card.appendChild(h); card.appendChild(p); card.appendChild(open);
-ov.appendChild(card);
-ov.addEventListener('click', function(e){ if(e.target===ov) ov.remove(); });
-document.body.appendChild(ov);
-}).catch(function(){ showToast('预览加载失败'); });
-}
-})();
 
 // ---------- 16. User notes + blacklist ----------
 // localStorage 'nx_notes' = {username: note}; 'nx_blocked' = [username].
