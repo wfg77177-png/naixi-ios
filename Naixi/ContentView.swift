@@ -1,13 +1,19 @@
 import SwiftUI
 import WebKit
+import Photos
+import AVFoundation
 
 // MARK: - JS injected into every Naixi page
 // Safe features only: sign-in button click (once/day), dark mode, hide ads,
-// keyword filter, fullscreen images, remember scroll position, section nav.
+// keyword filter, fullscreen images, remember scroll position, section nav,
+// plus v2 batch A (all read-only or user-triggered): infinite scroll,
+// read markers, only-OP, long-post folding, thread preview (long-press),
+// Markdown export, PDF export, batch image save, read-aloud.
 // localStorage holds ONLY the sign-in date guard + display settings
-// (dark / hideAds / keywords). No session, token, cookie or credential
-// is ever read or stored here; login state lives in the WKWebView
-// system cookie jar. No auto-reply / auto-comment anywhere.
+// (dark / hideAds / keywords / infinite / fold) + the read-thread id list
+// ('nx_read'). No session, token, cookie or credential is ever read or
+// stored here; login state lives in the WKWebView system cookie jar.
+// No auto-reply / auto-comment anywhere.
 //
 // Speed: the injected JS is split in two. nxJSStart (atDocumentStart)
 // carries ONLY the dark-mode + ad-hide CSS so the page never white-flashes.
@@ -134,7 +140,7 @@ row.style.display = hit? 'none': '';
 }
 window.__nxApplyKeywords = applyKeywords;
 applyKeywords();
-new MutationObserver(function(){ applyKeywords();}).observe(document.documentElement, {childList:true, subtree:true});
+new MutationObserver(function(){ applyKeywords(); applyReadMarks(); applyFolding();}).observe(document.documentElement, {childList:true, subtree:true});
 
 // ---------- 5. Fullscreen image viewer ----------
 document.addEventListener('click', function(e){
@@ -199,6 +205,264 @@ return false;
 
 // ---------- 9. Back to top ----------
 window.__nxTop = function(){ window.scrollTo({top:0, behavior:'smooth'});};
+
+// ---------- 10. Read markers (clicked threads dim) ----------
+// localStorage 'nx_read' holds ONLY an array of read thread ids.
+// No session/token/cookie is ever stored here.
+function threadIdFromHref(h){
+var m = h.match(/thread-(\\d+)/) || h.match(/[?&]tid=(\\d+)/);
+return m ? m[1] : null;
+}
+function getReadSet(){
+try{ return JSON.parse(localStorage.getItem('nx_read')||'[]');}catch(e){ return [];}
+}
+function applyReadMarks(){
+var set = getReadSet();
+if(!set.length) return;
+var rows = document.querySelectorAll('a[href*="thread-"], a[href*="mod=viewthread"]');
+rows.forEach(function(a){
+var id = threadIdFromHref(a.getAttribute('href')||'');
+if(!id) return;
+if(set.indexOf(id)!==-1){
+var row = a.closest('li, article, div, tr');
+if(row){ row.style.opacity='0.45';}
+}
+});
+}
+document.addEventListener('click', function(e){
+var a = e.target.closest ? e.target.closest('a[href*="thread-"], a[href*="mod=viewthread"]') : null;
+if(!a) return;
+var id = threadIdFromHref(a.getAttribute('href')||'');
+if(!id) return;
+var set = getReadSet();
+if(set.indexOf(id)===-1){
+set.push(id);
+if(set.length>500) set = set.slice(-500);
+try{ localStorage.setItem('nx_read', JSON.stringify(set));}catch(e){}
+}
+}, true);
+window.__nxClearRead = function(){
+try{ localStorage.removeItem('nx_read');}catch(e){}
+document.querySelectorAll('a[href*="thread-"], a[href*="mod=viewthread"]').forEach(function(a){
+var row = a.closest('li, article, div, tr');
+if(row){ row.style.opacity='';}
+});
+showToast('已清空已读记录');
+};
+applyReadMarks();
+
+// ---------- 11. Infinite scroll (append next list page) ----------
+var nxInfinite = read('infinite','1')==='1';
+var nxLoadingNext = false;
+window.__nxSetInfinite = function(on){ store('infinite', on?'1':'0'); nxInfinite = !!on; };
+function isListPage(){
+return !!document.querySelector('#threadlisttableid, #threadlist, .threadlist') || location.href.indexOf('mod=forumdisplay')!==-1 || /forum-\\d+-\\d+\\.html/.test(location.pathname);
+}
+function nextPageLink(){
+var nxt = document.querySelector('a.nxt');
+if(nxt && nxt.getAttribute('href')) return nxt;
+var links = document.querySelectorAll('a[href*="page="]');
+for(var i=0;i<links.length;i++){
+var t=(links[i].textContent||'').trim();
+if(t.indexOf('下一页')!==-1) return links[i];
+}
+return null;
+}
+function appendNextPage(){
+if(!nxInfinite || nxLoadingNext || !isListPage()) return;
+var link = nextPageLink();
+if(!link) return;
+var url = link.getAttribute('href');
+if(!url) return;
+if(url.indexOf('http')!==0){ url = new URL(url, location.href).href; }
+nxLoadingNext = true;
+fetch(url, {credentials:'include'}).then(function(r){ return r.text(); }).then(function(html){
+var doc = new DOMParser().parseFromString(html, 'text/html');
+var table = document.querySelector('#threadlisttableid');
+var newTable = doc.querySelector('#threadlisttableid');
+if(table && newTable){
+Array.prototype.slice.call(newTable.querySelectorAll('tbody')).forEach(function(tb){
+if(tb.id && tb.id.indexOf('stickthread')===0) return;
+table.appendChild(document.importNode(tb, true));
+});
+} else {
+var container = document.querySelector('#threadlist, .threadlist');
+var newContainer = doc.querySelector('#threadlist, .threadlist');
+if(container && newContainer){
+Array.prototype.slice.call(newContainer.children).forEach(function(ch){
+container.appendChild(document.importNode(ch, true));
+});
+}
+}
+var newNext = doc.querySelector('a.nxt');
+var newHref = newNext ? newNext.getAttribute('href') : null;
+document.querySelectorAll('a.nxt').forEach(function(n){
+if(newHref){ n.setAttribute('href', newHref); } else { n.remove(); }
+});
+applyKeywords(); applyReadMarks(); applyFolding();
+nxLoadingNext = false;
+}).catch(function(){ nxLoadingNext = false; });
+}
+window.addEventListener('scroll', function(){
+if(!nxInfinite || nxLoadingNext) return;
+if((window.innerHeight + window.scrollY) > document.body.scrollHeight - 600){ appendNextPage(); }
+}, {passive:true});
+
+// ---------- 12. Long-post folding ----------
+var nxFold = read('fold','1')==='1';
+window.__nxSetFold = function(on){ store('fold', on?'1':'0'); nxFold = !!on; if(on) applyFolding(); else unfoldAll(); };
+function unfoldAll(){
+document.querySelectorAll('[data-nx-folded="1"]').forEach(function(el){
+el.style.maxHeight=''; el.style.overflow=''; el.removeAttribute('data-nx-folded');
+});
+document.querySelectorAll('.nx-expand-btn').forEach(function(b){ b.remove(); });
+}
+function applyFolding(){
+if(!nxFold) return;
+var posts = document.querySelectorAll('.t_f');
+posts.forEach(function(el){
+if(el.getAttribute('data-nx-folded')) return;
+var txt = el.innerText || '';
+if(txt.length < 1500) return;
+el.setAttribute('data-nx-folded','1');
+el.style.maxHeight='420px'; el.style.overflow='hidden';
+var anchor = el.closest('.pct') || el.closest('div[id^="post_"]');
+var btn = document.createElement('button');
+btn.className='nx-expand-btn';
+btn.textContent='展开全文';
+btn.style.cssText='display:block;margin:8px auto;padding:6px 18px;border-radius:16px;border:1px solid #888;background:#fff;color:#333;font-size:14px;';
+btn.addEventListener('click', function(){
+el.style.maxHeight=''; el.style.overflow='';
+btn.remove();
+});
+if(anchor && anchor.parentNode){ anchor.parentNode.insertBefore(btn, anchor.nextSibling); }
+else { el.appendChild(btn); }
+});
+}
+applyFolding();
+
+// ---------- 13. Only OP (toggle authorid filter) ----------
+window.__nxOnlyOP = function(){
+var u = new URL(location.href);
+if(u.searchParams.get('authorid')){ u.searchParams.delete('authorid'); location.href = u.href; return; }
+var first = document.querySelector('div[id^="post_"] a[href*="space-uid-"], div[id^="post_"] a[href*="uid="]');
+var uid = null;
+if(first){
+var h = first.getAttribute('href')||'';
+var m = h.match(/space-uid-(\\d+)/) || h.match(/[?&]uid=(\\d+)/);
+if(m) uid = m[1];
+}
+if(!uid){ showToast('未找到楼主信息'); return; }
+u.searchParams.set('authorid', uid);
+location.href = u.href;
+};
+
+// ---------- 14. Thread text / Markdown export / image collection ----------
+function htmlToMd(root){
+var clone = root.cloneNode(true);
+clone.querySelectorAll('img').forEach(function(im){
+var src = im.getAttribute('data-original') || im.getAttribute('data-src') || im.getAttribute('src') || '';
+var alt = im.getAttribute('alt') || '图片';
+im.replaceWith(document.createTextNode('\\n![' + alt + '](' + src + ')\\n'));
+});
+clone.querySelectorAll('a').forEach(function(a){
+var href = a.getAttribute('href')||'';
+var txt = (a.textContent||'').trim();
+a.replaceWith(document.createTextNode(txt ? '[' + txt + '](' + href + ')' : href));
+});
+clone.querySelectorAll('br').forEach(function(br){ br.replaceWith(document.createTextNode('\\n')); });
+clone.querySelectorAll('p, div, tr').forEach(function(el){ el.appendChild(document.createTextNode('\\n')); });
+var s = clone.innerText || '';
+return s.replace(/\\n{3,}/g, '\\n\\n').trim();
+}
+window.__nxThreadText = function(){
+var title = '';
+var t = document.querySelector('#thread_subject');
+if(t) title = (t.textContent||'').trim();
+var parts = [];
+if(title) parts.push(title);
+document.querySelectorAll('.t_f').forEach(function(el){
+var s = (el.innerText||'').trim();
+if(s) parts.push(s);
+});
+return parts.join('\\n\\n').slice(0, 12000);
+};
+window.__nxExportMarkdown = function(){
+var title = '';
+var t = document.querySelector('#thread_subject');
+if(t) title = (t.textContent||'').trim();
+var lines = [];
+if(title) lines.push('# ' + title, '');
+document.querySelectorAll('div[id^="post_"]').forEach(function(post){
+var a = post.querySelector('.pls a.xw1, .authi a.xw1');
+var author = a ? (a.textContent||'').trim() : '';
+var body = post.querySelector('.t_f');
+if(!body) return;
+var md = htmlToMd(body);
+if(!md) return;
+if(author) lines.push('## ' + author, '');
+lines.push(md, '', '---', '');
+});
+return lines.join('\\n');
+};
+window.__nxCollectImages = function(){
+var urls = [];
+document.querySelectorAll('.t_f img, .pct img').forEach(function(im){
+var src = im.getAttribute('data-original') || im.getAttribute('data-src') || im.getAttribute('src') || '';
+if(!src || src.indexOf('http')!==0) return;
+if(src.indexOf('avatar')!==-1) return;
+if(im.naturalWidth && im.naturalWidth < 120) return;
+if(urls.indexOf(src)===-1) urls.push(src);
+});
+return JSON.stringify(urls.slice(0, 50));
+};
+
+// ---------- 15. Long-press thread preview ----------
+(function(){
+var pvTimer = null, pvX = 0, pvY = 0, pvA = null;
+function pvCancel(){ if(pvTimer){ clearTimeout(pvTimer); pvTimer = null; } }
+var noCallout = document.createElement('style');
+noCallout.textContent='a[href*="thread-"],a[href*="mod=viewthread"]{-webkit-touch-callout:none;}';
+document.documentElement.appendChild(noCallout);
+document.addEventListener('touchstart', function(e){
+pvCancel();
+var a = e.target.closest ? e.target.closest('a[href*="thread-"], a[href*="mod=viewthread"]') : null;
+if(!a || !e.touches || e.touches.length!==1) return;
+pvA = a; pvX = e.touches[0].clientX; pvY = e.touches[0].clientY;
+pvTimer = setTimeout(function(){ pvTimer = null; pvShowPreview(pvA); }, 650);
+}, {passive:true});
+document.addEventListener('touchmove', function(e){
+if(!pvTimer) return;
+var t = e.touches[0];
+if(Math.abs(t.clientX-pvX) > 12 || Math.abs(t.clientY-pvY) > 12) pvCancel();
+}, {passive:true});
+document.addEventListener('touchend', pvCancel, {passive:true});
+function pvShowPreview(a){
+var href = a.getAttribute('href');
+if(!href) return;
+var url = href.indexOf('http')===0 ? href : new URL(href, location.href).href;
+fetch(url, {credentials:'include'}).then(function(r){ return r.text(); }).then(function(html){
+var doc = new DOMParser().parseFromString(html, 'text/html');
+var first = doc.querySelector('.t_f');
+var txt = first ? (first.innerText||'').trim().slice(0, 300) : '（无预览）';
+var title = (a.textContent||'').trim();
+var ov = document.createElement('div');
+ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:999998;display:flex;align-items:flex-end;justify-content:center;';
+var card = document.createElement('div');
+card.style.cssText = 'background:#fff;color:#111;border-radius:18px 18px 0 0;padding:18px;max-height:55vh;overflow:auto;width:100%;font-size:15px;line-height:1.6;';
+var h = document.createElement('div');
+h.textContent = title; h.style.cssText='font-weight:700;margin-bottom:8px;';
+var p = document.createElement('p'); p.textContent = txt; p.style.margin='0';
+var open = document.createElement('button');
+open.textContent='打开帖子'; open.style.cssText='margin-top:14px;width:100%;padding:10px;border-radius:12px;border:none;background:#007aff;color:#fff;font-size:16px;';
+open.addEventListener('click', function(){ ov.remove(); a.click(); });
+card.appendChild(h); card.appendChild(p); card.appendChild(open);
+ov.appendChild(card);
+ov.addEventListener('click', function(e){ if(e.target===ov) ov.remove(); });
+document.body.appendChild(ov);
+}).catch(function(){ showToast('预览加载失败'); });
+}
+})();
 })();
 """
 
@@ -210,6 +474,15 @@ weak var webView: WKWebView?
 @Published var hideAds = true
 @Published var keywords = ""
 @Published var canGoBack = false
+// v2 batch A: safe features (read-only or user-triggered)
+@Published var isSpeaking = false
+@Published var infiniteScroll = true
+@Published var foldLongPosts = true
+private let speech = AVSpeechSynthesizer()
+
+init() {
+speech.delegate = self
+}
 
 let homeURL = URL(string: "https://forum.naixi.net/")!
 let newAPIURL = URL(string: "https://newapi.naixi.net/")!
@@ -260,6 +533,133 @@ webView?.evaluateJavaScript("window.__nxSetKeywords && window.__nxSetKeywords('\
 func manualSignIn() {
 webView?.evaluateJavaScript("window.__nxClickSignIn && window.__nxClickSignIn(true);", completionHandler: nil)
 }
+
+// MARK: - v2 batch A: safe features (read-only or user-triggered)
+func setInfiniteScroll(_ on: Bool) {
+infiniteScroll = on
+UserDefaults.standard.set(on, forKey: "nx_infinite")
+webView?.evaluateJavaScript("window.__nxSetInfinite && window.__nxSetInfinite(\(on ? "true" : "false"));", completionHandler: nil)
+}
+func setFoldLongPosts(_ on: Bool) {
+foldLongPosts = on
+UserDefaults.standard.set(on, forKey: "nx_fold")
+webView?.evaluateJavaScript("window.__nxSetFold && window.__nxSetFold(\(on ? "true" : "false"));", completionHandler: nil)
+}
+func clearReadHistory() {
+webView?.evaluateJavaScript("window.__nxClearRead && window.__nxClearRead();", completionHandler: nil)
+}
+func toggleOnlyOP() {
+webView?.evaluateJavaScript("window.__nxOnlyOP && window.__nxOnlyOP();", completionHandler: nil)
+}
+func exportMarkdown() {
+webView?.evaluateJavaScript("window.__nxExportMarkdown && window.__nxExportMarkdown();") { result, _ in
+guard let md = result as? String, !md.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('当前页没有可导出的帖子');", completionHandler: nil)
+return
+}
+let url = FileManager.default.temporaryDirectory.appendingPathComponent("naixi-thread.md")
+try? md.write(to: url, atomically: true, encoding: .utf8)
+self.presentShare(items: [url])
+}
+}
+func exportPDF() {
+guard let wv = webView else { return }
+wv.createPDF(configuration: WKPDFConfiguration()) { result in
+switch result {
+case .success(let data):
+let url = FileManager.default.temporaryDirectory.appendingPathComponent("naixi-page.pdf")
+try? data.write(to: url)
+self.presentShare(items: [url])
+case .failure:
+wv.evaluateJavaScript("window.__nxToast && window.__nxToast('生成 PDF 失败');", completionHandler: nil)
+}
+}
+}
+func savePageImages() {
+webView?.evaluateJavaScript("window.__nxCollectImages && window.__nxCollectImages();") { result, _ in
+guard let json = result as? String,
+let data = json.data(using: .utf8),
+let urls = try? JSONDecoder().decode([String].self, from: data),
+!urls.isEmpty else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('本页没有可保存的图片');", completionHandler: nil)
+return
+}
+self.saveImagesToPhotos(urls)
+}
+}
+private func saveImagesToPhotos(_ urls: [String]) {
+PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+guard status == .authorized || status == .limited else {
+DispatchQueue.main.async {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('未获得相册权限');", completionHandler: nil)
+}
+return
+}
+let group = DispatchGroup()
+let lock = NSLock()
+var saved = 0
+for u in urls {
+guard let url = URL(string: u) else { continue }
+group.enter()
+URLSession.shared.dataTask(with: url) { data, _, _ in
+defer { group.leave() }
+guard let data = data, let img = UIImage(data: data) else { return }
+let sem = DispatchSemaphore(value: 0)
+PHPhotoLibrary.shared().performChanges({
+PHAssetChangeRequest.creationRequestForAsset(from: img)
+}) { ok, _ in
+if ok { lock.lock(); saved += 1; lock.unlock() }
+sem.signal()
+}
+sem.wait()
+}.resume()
+}
+group.notify(queue: .main) {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('已保存 \(saved) 张图片到相册');", completionHandler: nil)
+}
+}
+}
+func toggleSpeak() {
+if speech.isSpeaking {
+speech.stopSpeaking(at: .immediate)
+isSpeaking = false
+return
+}
+webView?.evaluateJavaScript("window.__nxThreadText && window.__nxThreadText();") { result, _ in
+guard let text = result as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+self.webView?.evaluateJavaScript("window.__nxToast && window.__nxToast('当前页没有可朗读的正文');", completionHandler: nil)
+return
+}
+let utterance = AVSpeechUtterance(string: text)
+utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+self.isSpeaking = true
+self.speech.speak(utterance)
+}
+}
+func presentShare(items: [Any]) {
+guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
+var top = root
+while let presented = top.presentedViewController { top = presented }
+let vc = UIActivityViewController(activityItems: items, applicationActivities: nil)
+if let pop = vc.popoverPresentationController {
+pop.sourceView = top.view
+pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
+pop.permittedArrowDirections = []
+}
+top.present(vc, animated: true)
+}
+}
+
+// MARK: - AVSpeechSynthesizerDelegate (reset speaking state)
+extension BrowserModel: AVSpeechSynthesizerDelegate {
+func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+DispatchQueue.main.async { self.isSpeaking = false }
+}
+func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+DispatchQueue.main.async { self.isSpeaking = false }
+}
 }
 
 // MARK: - ContentView
@@ -284,6 +684,8 @@ model.hideAds = UserDefaults.standard.object(forKey: "nx_hideAds") as? Bool?? tr
 model.keywords = UserDefaults.standard.string(forKey: "nx_keywords")?? ""
 let fs = UserDefaults.standard.double(forKey: "nx_fontScale")
 if fs > 0 { model.fontScale = CGFloat(fs)}
+model.infiniteScroll = UserDefaults.standard.object(forKey: "nx_infinite") as? Bool ?? true
+model.foldLongPosts = UserDefaults.standard.object(forKey: "nx_fold") as? Bool ?? true
 }
 }
 }
@@ -470,6 +872,24 @@ TextField("多个关键词用英文逗号隔开", text: $keywordsText)
 Text("包含这些词的帖子标题会被隐藏。")
 .font(.footnote)
 .foregroundStyle(.secondary)
+}
+Section("当前帖子") {
+Button("只看楼主 / 显示全部") { model.toggleOnlyOP(); dismiss() }
+Button("导出 Markdown") { model.exportMarkdown() }
+Button("转 PDF") { model.exportPDF() }
+Button("保存本页图片到相册") { model.savePageImages(); dismiss() }
+Button(model.isSpeaking ? "停止朗读" : "朗读本页") { model.toggleSpeak(); dismiss() }
+}
+Section("阅读记录") {
+Button("清空已读记录") { model.clearReadHistory() }
+Toggle("无缝翻页", isOn: Binding(
+get: { model.infiniteScroll },
+set: { model.setInfiniteScroll($0) }
+))
+Toggle("长文折叠", isOn: Binding(
+get: { model.foldLongPosts },
+set: { model.setFoldLongPosts($0) }
+))
 }
 Section("快捷入口") {
 Button("New API 签到（每天 1–2 刀）") { model.goNewAPI(); dismiss()}
