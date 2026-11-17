@@ -675,7 +675,7 @@ var p = document.getElementById('nx-tr-panel'); if(p) p.remove();
 """
 
 // MARK: - Model
-final class BrowserModel: ObservableObject {
+final class BrowserModel: NSObject, ObservableObject {
 weak var webView: WKWebView?
 @Published var isDark = false
 @Published var fontScale: CGFloat = 1.0
@@ -689,6 +689,7 @@ weak var webView: WKWebView?
 private let speech = AVSpeechSynthesizer()
 
 init() {
+super.init()
 speech.delegate = self
 }
 
