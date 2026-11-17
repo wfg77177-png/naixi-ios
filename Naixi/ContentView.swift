@@ -688,7 +688,7 @@ weak var webView: WKWebView?
 @Published var foldLongPosts = true
 private let speech = AVSpeechSynthesizer()
 
-init() {
+override init() {
 super.init()
 speech.delegate = self
 }
